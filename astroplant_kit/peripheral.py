@@ -124,7 +124,7 @@ class Peripheral(object):
 
     def __str__(self):
         return self.name
-        
+
 class Sensor(Peripheral):
     """
     Abstract sensor base class.
@@ -224,7 +224,59 @@ class Actuator(Peripheral):
     """
 
     RUNNABLE = False
-        
+
+class Camera(Peripheral):
+    """
+    Abstract camera base class. WIP.
+    Not runnable, but commandable. We don't want to run this constantly, user has to
+    actively ask for measurements at this point. The command structure provides options
+    for NDVI pictures, calibration and plant growth statistics, controlled via a
+    CameraCommandType.
+    """
+
+    # overwrite boolean at peripheral level to indicate that camera's do accept commands
+    COMMANDS = True
+    # boolean that indicates camera can run the visible spectrum routines
+    VIS_CAPABLE = False
+    # boolean that indicates camera can run the near infrared spectrum routines
+    NIR_CAPABLE = False
+
+    def __init__(self, *args, light_pins, growth_light_control, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.light_pins = light_pins
+        self.growth_light_control = growth_light_control
+
+    async def do(self, command):
+        if command == CameraCommandType.REGULAR_PHOTO or command == CameraCommandType.LEAF_MASK:
+            self.make_photo_vis(self, command)
+        elif command == CameraCommandType.NDVI_PHOTO or command == CameraCommandType.NIR_PHOTO:
+            self.make_photo_nir(self, command)
+        elif command == CameraCommandType.LEAF_AREA_STACKED or command == CameraCommandType.PLANT_SIZE_MINOR or command == CameraCommandType.PLANT_SIZE_MAJOR or command == CameraCommandType.PLANT_SIZE_BOUNDING_BOX:
+            self.measure(self, command)
+        elif command == CameraCommandType.CALIBRATE:
+            self.calibrate()
+        else:
+            raise ValueError()
+
+    @abc.abstractmethod
+    async def do_vis(self, command):
+        raise NotImplementedError()
+
+    @abc.abstractmethod
+    async def do_nir(self, command):
+        raise NotImplementedError()
+
+    @abc.abstractmethod
+    async def measure(self, command):
+        raise NotImplementedError()
+
+    @abc.abstractmethod
+    async def calibrate(self):
+        raise NotImplementedError()
+
+    async def _publish_measurement(self, measurement):
+        self._publish_handle(measurement)
+
 class MeasurementType(object):
     """
     Class holding the possible types of measurements.
@@ -235,6 +287,32 @@ class MeasurementType(object):
 
     #: A reduced measurement (e.g. an average over a longer time window)
     REDUCED = "REDUCED"
+
+class CameraCommandType(object):
+    """
+    Class holding the possible types of commands that can be performed by the camera.
+    """
+
+    # regular photo (visible spectrum: ~400-700 nm, color balanced)
+    REGULAR_PHOTO = "REGULAR_PHOTO"
+    # NDVI photo (NIR vs red spectrum: ~850 nm vs ~630 nm, calibrated to sunlight)
+    NDVI_PHOTO = "NDVI_PHOTO"
+    # NIR photo (NIR spectrum: ~850 nm)
+    NIR_PHOTO = "NIR_PHOTO"
+    # leaf mask (should produce a black/white mask that masks out the leaves)
+    LEAF_MASK = "LEAF_MASK"
+
+    # visible leaf area from above (does not correct for leaves on top of each other)
+    LEAF_AREA_STACKED = "LEAF_AREA_STACKED"
+    # plant size along major axis
+    PLANT_SIZE_MAJOR = "PLANT_SIZE_MAJOR"
+    # plant size along minor axis
+    PLANT_SIZE_MINOR = "PLANT_SIZE_MINOR"
+    # plant size along minor axis
+    PLANT_SIZE_BOUNDING_BOX = "PLANT_SIZE_BOUNDING_BOX"
+
+    # calibrate the camera and the lights
+    CALIBRATE = "CALIBRATE"
 
 class Measurement(object):
     """
@@ -257,7 +335,7 @@ class Measurement(object):
 
     def get_physical_unit(self):
         return self.physical_unit
-        
+
     def get_physical_unit_short(self):
         # Todo:
         # It's probably better to have a predefined registry of
@@ -291,7 +369,7 @@ class Measurement(object):
             'measurement_type': self.measurement_type
         }
     """
-        
+
     def __str__(self):
         return "%s - %s %s: %s %s" % (self.date_time, self.peripheral, self.physical_quantity, self.value, self.physical_unit)
 
@@ -309,7 +387,7 @@ class Display(Peripheral):
         self.log_message_queue = []
         self.log_condition = asyncio.Condition()
         self.measurements = {}
-        
+
         # Subscribe to all measurements.
         self.manager.subscribe_predicate(lambda a: True, lambda m: self.handle_measurement(m))
 
@@ -381,14 +459,14 @@ class Display(Peripheral):
         :param m: The measurement to handle.
         """
         self.measurements[(m.get_peripheral(), m.get_physical_quantity())] = m
-        
+
 class DebugDisplay(Display):
     """
     A trivial peripheral display device implementation printing messages to the terminal.
     """
     def display(self, str):
         print("Debug Display: %s" % str)
-        
+
 class BlackHoleDisplay(Display):
     """
     A trivial peripheral display device implementation ignoring all display messages.
@@ -415,41 +493,40 @@ class LocalDataLogger(Actuator):
     """
     A virtual peripheral device writing observations to internal storage.
     """
-    
+
     def __init__(self, *args, storage_path, **kwargs):
         super().__init__(*args, **kwargs)
         self.storage_path = storage_path
-        
+
         # Subscribe to all REDUCED (processed) measurements.
         self.manager.subscribe_predicate(
             lambda m: m.measurement_type == MeasurementType.REDUCED,
             self._store_measurement);
-        
+
     def _store_measurement(self, measurement):
         # Import required modules.
         import csv
         import os
-    
+
         measurement_dict = measurement.__dict__
-    
+
         file_name = "%s-%s.csv" % (measurement.date_time.strftime("%Y%m%d"), measurement.physical_quantity)
         path = os.path.join(self.storage_path, file_name)
-        
+
         # Check whether the file exists.
         exists = os.path.isfile(path)
-        
+
         # Create file and directories if it does not exist yet.
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        
+
         with open(path, 'a', newline='') as csv_file:
             # Get the measurement object field names.
             # Sort them to ensure csv headers have
             # consistent field ordering.
             field_names = sorted(measurement_dict.keys())
             writer = csv.DictWriter(csv_file, fieldnames=field_names)
-            
+
             if not exists:
                 # File is new: write csv header.
                 writer.writeheader()
             writer.writerow(measurement_dict)
-        
