@@ -241,29 +241,33 @@ class Camera(Peripheral):
     # boolean that indicates camera can run the near infrared spectrum routines
     NIR_CAPABLE = False
 
-    def __init__(self, *args, light_pins, growth_light_control, **kwargs):
+    def __init__(self, *args, pi, light_pins, growth_light_control, **kwargs):
         super().__init__(*args, **kwargs)
+        self.pi = pi
         self.light_pins = light_pins
         self.growth_light_control = growth_light_control
 
     async def do(self, command):
         if command == CameraCommandType.REGULAR_PHOTO or command == CameraCommandType.LEAF_MASK:
-            self.make_photo_vis(self, command)
+            measurement = self.make_photo_vis(self, command)
+            asyncio.ensure_future(self._publish_measurement(measurement))
         elif command == CameraCommandType.NDVI_PHOTO or command == CameraCommandType.NIR_PHOTO:
-            self.make_photo_nir(self, command)
+            measurement = self.make_photo_nir(self, command)
+            asyncio.ensure_future(self._publish_measurement(measurement))
         elif command == CameraCommandType.LEAF_AREA_STACKED or command == CameraCommandType.PLANT_SIZE_MINOR or command == CameraCommandType.PLANT_SIZE_MAJOR or command == CameraCommandType.PLANT_SIZE_BOUNDING_BOX:
-            self.measure(self, command)
+            measurement = self.measure(self, command)
+            asyncio.ensure_future(self._publish_measurement(measurement))
         elif command == CameraCommandType.CALIBRATE:
             self.calibrate()
         else:
             raise ValueError()
 
     @abc.abstractmethod
-    async def do_vis(self, command):
+    async def make_photo_vis(self, command):
         raise NotImplementedError()
 
     @abc.abstractmethod
-    async def do_nir(self, command):
+    async def make_photo_nir(self, command):
         raise NotImplementedError()
 
     @abc.abstractmethod
@@ -276,6 +280,14 @@ class Camera(Peripheral):
 
     async def _publish_measurement(self, measurement):
         self._publish_handle(measurement)
+
+class GrowthLightControl(object):
+    """
+    Class holding the controls of the growth light.
+    """
+
+    OFF = "OFF"
+    ON = "ON"
 
 class MeasurementType(object):
     """
